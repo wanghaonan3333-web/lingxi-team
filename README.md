@@ -17,7 +17,7 @@
 1. 在运行团队 OpenClaw 的电脑上执行（已验证版本 2026.10.5）。使用命名 profile 时，给安装、配置和重启命令都加同一个 `--profile 名称`。
 
    ```sh
-   openclaw plugins install clawhub:@wanghaonan3333-web/lingxi-team
+   openclaw plugins install --accept-capabilities clawhub:@wanghaonan3333-web/lingxi-team
    ```
 
 2. 为团队机器人准备独立 OpenClaw profile、聊天渠道账号及空白 Agent 工作区，仅放行获准成员的私聊。只给这个专用 Agent 开放 `lingxi_team_read`。关闭该 profile 的共享记忆、自动跨会话检索以及其他自动注入资料的插件，不授予成员文件、终端、历史搜索、任意联网或管理权限。将团队机器人消息路由给下面的 `director` Agent。已有个人助手继续使用其自己的 profile。

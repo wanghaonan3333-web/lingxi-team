@@ -1,0 +1,22 @@
+{
+  "name": "@wanghaonan3333-web/lingxi-team",
+  "version": "0.2.1",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.10.5"
+    },
+    "build": {
+      "openclawVersion": "2026.10.5"
+    }
+  },
+  "description": "将团队 OpenClaw 私聊绑定到灵犀导演工作台，按成员授权读取所属企业的项目与剧本。",
+  "files": [
+    "index.js",
+    "openclaw.plugin.json",
+    "README.md"
+  ]
+}

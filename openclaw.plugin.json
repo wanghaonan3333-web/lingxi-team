@@ -1,0 +1,15 @@
+{
+  "id": "lingxi-team",
+  "name": "灵犀团队助手",
+  "description": "在已授权的私聊中读取灵犀团队的项目与剧本。",
+  "contracts": {"tools": ["lingxi_team_read"]},
+  "activation": {"onStartup": true},
+  "configSchema": {
+    "type": "object", "additionalProperties": false,
+    "properties": {
+      "url": {"type": "string", "description": "管理员配置的灵犀站点地址"},
+      "agentId": {"type": "string", "description": "专用于团队私聊的 Agent ID"},
+      "hostKeyFile": {"type": "string", "description": "本机 0600 主机密钥文件的绝对路径"}
+    }
+  }
+}

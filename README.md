@@ -1,62 +1,68 @@
-# 灵犀团队私聊接入
+# 灵犀 OpenClaw 个人接入 · 0.3.0
 
-这份说明供运行 OpenClaw 的管理员使用。成员只需要灵犀团队账号和一个可以私聊这台 OpenClaw 的聊天账号。
+在 **Octo 群或子区 @OpenClaw，连接发言人自己的灵犀账号**。不是给整个群授权，也不用转去私聊。
 
-## 团队成员怎么用
+工作台：https://ruyi-aigc.zero0123.com/director/
 
-1. 登录团队工作台，点击 **连接我的 OpenClaw → 生成团队授权码**。
-2. 把复制的整条 `/lingxi LX-…` 指令发到本团队已安装本插件的 OpenClaw 私聊。每个成员单独领码，生成新码会替换该团队尚未使用的旧码。码在 10 分钟内可用一次。
-3. 收到绑定的团队名称和私聊编号后，单发 `/lingxi` 即可核对项目列表。这一步由插件处理，无需模型。开通对话模型后，可以直接问“读一下《排练室》第一集，列出人物和每场需要的道具”，草稿显示在私聊里。
+平台后台：https://ruyi-aigc.zero0123.com/director/admin/
 
-一次绑定有效 30 天。工作台可按私聊编号末六位撤销授权，再次查询就会被拒绝。之前发出的消息可能仍在聊天记录中，因此一段私聊只服务一个团队。成员更换账号或机器人后须在新私聊重新绑定。
+## 成员只需三步
 
-## 管理员的一次性配置
+1. 用自己的如意账号登录工作台，点击 **OpenClaw 连接 → 生成我的接入消息 → 复制接入消息**。
+2. 到平时使用的 Octo 群或子区 **@团队 OpenClaw**，粘贴消息。已安装插件时，它调用 `lingxi_bind`，识别当前实际发言人的 Octo ID，提交个人连接请求。
+3. 回工作台，核对机器人回复中的 Octo 用户 ID，点击 **确认是我，连接账号**。然后在原位置 @它说“查看我的灵犀项目”。
 
-本地验收使用了 OpenClaw 2026.10.5、独立配置和样例数据。
+只需本人确认，不需要群管理员或平台管理员审批。因为码发在群内，公开码只用于发起请求；未经本人网页确认不能读取企业资料。不要确认陌生 Octo 用户的请求，重新生成会取消尚未确认的旧请求。
 
-1. 在运行团队 OpenClaw 的电脑上执行（已验证版本 2026.10.5）。使用命名 profile 时，给安装、配置和重启命令都加同一个 `--profile 名称`。
+每位成员各自连接一次。同一机器人账号和 Agent 下，换群、换子区不用重复连接，其他人不能借用你的授权。授权有效 30 天，可在自己的工作台撤销。群内回答对能看到该消息的人可见；个人授权不等于私密聊天。
 
-   ```sh
-   openclaw plugins install --accept-capabilities clawhub:@wanghaonan3333-web/lingxi-team
-   ```
+若模型没调用工具，可在目标群／子区单独发送 `/lingxi LM-你的接入码`，按渠道要求 @机器人。接入码 10 分钟内有效且只能使用一次。不要把命令当作终端命令。
 
-2. 为团队机器人准备独立 OpenClaw profile、聊天渠道账号及空白 Agent 工作区，仅放行获准成员的私聊。只给这个专用 Agent 开放 `lingxi_team_read`。关闭该 profile 的共享记忆、自动跨会话检索以及其他自动注入资料的插件，不授予成员文件、终端、历史搜索、任意联网或管理权限。将团队机器人消息路由给下面的 `director` Agent。已有个人助手继续使用其自己的 profile。
-3. 将下面的字段合入专用 profile 的配置，替换绝对路径。若渠道本身通过插件提供，在 allow 列表中同时保留该渠道及运行模型所需的插件。
+## 如意 API Key 在哪里绑定
 
-```json
-{
-  "session": {"dmScope": "per-account-channel-peer"},
-  "agents": {"entries": {"director": {
-    "workspace": "/ABSOLUTE/PRIVATE/lingxi-agent-workspace",
-    "tools": {"allow": ["lingxi_team_read"]}
-  }}},
-  "plugins": {
-    "allow": ["lingxi-team"],
-    "entries": {"lingxi-team": {
-      "enabled": true,
-      "config": {
-        "agentId": "director",
-        "url": "https://ruyi-aigc.zero0123.com/director"
-      }
-    }}
-  }
-}
-```
+工作台侧栏 **如意 API Key 授权** → 输入属于当前如意账号的 Key → **验证并授权**。不要将 Key 发到聊天里。
 
-4. 在同一 profile 下检查配置和加载结果，再启动或重载专用 Gateway。将下面示例中的 `lingxi-director` 替换为所选 profile 名。
+“如意账号已有 Key”和“已授权给灵犀”是两件事。OpenClaw 个人连接也不等于授权付费生成。本插件只读取项目、素材说明和分集剧本，不读取 Key、不领生成任务、不扣费。真实生成仍按平台的独立执行开关与本人确认处理。
+
+## 团队管理员安装／升级一次
+
+在运行 OpenClaw 的主机上操作，成员电脑不用安装。命名 profile 的安装、检查、配置及重载必须使用同一个 profile。
 
 ```sh
-openclaw --profile lingxi-director config validate
-openclaw --profile lingxi-director plugins inspect lingxi-team --runtime --json
+openclaw plugins install --accept-capabilities clawhub:@wanghaonan3333-web/lingxi-team
 ```
 
-验收时应看到 `status: loaded`、命令 `lingxi`、工具 `lingxi_team_read`，且 diagnostics 没有该插件的错误。站点只需提供入站 HTTPS，Mac 通过出站请求读取灵犀，无需对公网开放 Mac 的 Gateway 端口。绑定表位于团队配置文件同目录的 `chat-pairing.sqlite3`，备份和恢复时与团队配置、项目库保持一致。
+群内个人连接需要 **0.3.0 或更高版本**。`plugin already exists` 不代表升级成功：备份原插件和配置后执行 `openclaw plugins update lingxi-team`。若原插件来自本地包、不支持 update，核对旧目录与备份后，可使用 `openclaw plugins install --force --accept-capabilities clawhub:@wanghaonan3333-web/lingxi-team` 替换为注册源版本；不要删除本机 `lingxi-team/installation.key`，否则原连接身份会改变。
 
-## 现场验收和排查
+检查：
 
-- 用两个测试成员，在两段真实私聊中分别绑定两个样例团队。先发 `/lingxi` 对照各自的项目，再撤销其中一段私聊并重试，另一团队应继续可读。最后在模型运行另行获准后，验收一次自然语言提问和回答。
-- 网页没有连接按钮时，检查是否已部署支持私聊的多团队服务、启用 LINGXI_TEAM_PLUGINS=1 并重启。插件报认证失败时，核对插件版本、服务端配置及灵犀地址。
-- 聊天渠道须同时向命令处理器和工具传递可信的发送者、Agent 和独立私聊会话键。群聊、共用 main 会话、合并身份或渠道改写发送者 ID 都可能被拒绝。先在目标渠道验收，不以消息正文中的用户名或团队 ID 代替可信身份。
-- 当前读取范围为本团队的项目清单、项目概况、资产名称与说明、分集目录及剧本文本。自动领任务、回传结果走独立的 CLI 连接器，需要单独授权。工作台只读绑定可单独启用。
+```sh
+openclaw --profile 你的profile config validate
+openclaw --profile 你的profile plugins inspect lingxi-team --runtime --json
+```
 
-[OpenClaw 官方私聊会话说明](https://docs.openclaw.ai/concepts/session)
+应显示 `loaded`、命令 `lingxi`，以及工具 **lingxi_bind、lingxi_team_read**。将这两个工具开放给本企业实际承接群消息的 Agent；插件配置 `agentId` 必须与该 Agent 一致，`url` 为上述工作台地址。个人接入使用插件自动维护的本机身份，不能配置共享 `hostKeyFile`。无需新增整群授权配置。
+
+## 身份与会话约束
+
+- 用 OpenClaw 可信上下文里的当前发送者、机器人账号和 Agent 生成个人身份；不读取聊天正文中的用户名、@对象或模型提供的用户 ID 作为授权身份。
+- Octo 主群和子区都支持。渠道须向命令／工具提供可信目的地；子区完整 ID 为 `父群____子区`，需与会话键一致。丢失或冲突时拒绝，不回退主群。
+- 工具不能指定收件人或任意群 ID，读取结果回到调用它的原会话。不得把子区结果主动转发到主群。
+- 一套企业 Agent 可以服务多位成员。不同企业不能共用这套 Agent 的资料历史、文件和记忆；服务端将首次确认的企业固定到这个 Agent 的安装身份，避免串企业。另一个企业由管理员使用隔离 Agent，而不是让普通成员配置。
+- 群共享会话中以前回复过的资料可能已存在于历史中。当前发送者未授权时 API 会拒绝读取，但插件不能抹去已有聊天历史，也不能限制一个同时持有文件／终端工具的 Agent 自行读取本机材料。管理员须管理企业 Agent 的资料、工具和群可见性。
+- 原有 LX 私聊绑定继续保留；仅接受原来的 `per-account-channel-peer` 独立私聊会话，不自动迁移为群授权。
+
+## 故障提示
+
+| 提示 | 处理 |
+| --- | --- |
+| 没有 lingxi_bind | 检查是否仍是 0.2.x，以及同 profile 的插件加载和工具白名单 |
+| 请使用管理员指定的灵犀助手 | 插件 agentId 与当前承接消息的 Agent 不一致，由管理员核对 |
+| 当前成员尚未连接 | 由当前成员生成自己的接入消息，网页确认后再试 |
+| 缺少可信账号／发送者／目的地 | 当前渠道未提供必需上下文，升级渠道；不要伪造身份 |
+| Agent 已处理其他企业资料 | 由管理员使用独立企业 Agent，不能清数据库绕过历史隔离 |
+| 码过期 | 工作台重新生成；旧码和旧待确认请求失效 |
+
+## 本地验证与发布边界
+
+仓库的 `test_member_chat.py` 和 `member_chat_flow.mjs` 使用真实本地 HTTP 服务与插件执行代码，覆盖主群、两个子区、两个成员、机器人账号隔离、跨企业、撤销、过期、并发兑换和旧私聊兼容。不等同于现场 Octo Gateway、模型推理或付费生成验收。

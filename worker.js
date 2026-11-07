@@ -32,13 +32,27 @@ const finalAssistant=messages=>messages?.filter(m=>m.role==='assistant'&&!m.tool
   !m.content?.some?.(b=>b.type==='toolCall'||b.type==='tool_use')&&
   !['inter_session','internal_system'].includes(m.provenance?.kind)).at(-1);
 
+// A wait timeout without endedAt is an observation timeout, not a model outcome.
+const unsettled=result=>result.status==='pending'||(result.status==='timeout'&&!result.endedAt);
+function durableSuccess(message,journal) {
+  const meta=message?.__openclaw;
+  return message?.role==='assistant'&&message.stopReason==='stop'&&
+    meta?.runId===journal.runId&&meta.runTerminal!==false&&
+    (meta.runTerminal===true||(journal.resultRecoveryVersion===1&&!meta.mirrorOrigin))&&meta.truncated!==true&&
+    !message.openclawAbort?.aborted&&!message.errorMessage&&
+    !['inter_session','internal_system'].includes(message.provenance?.kind)&&
+    !message.tool_calls?.length&&!message.content?.some?.(b=>['toolCall','tool_use'].includes(b.type));
+}
+const terminalEvidence=(message,journal)=>({source:'session_transcript',runId:journal.runId,
+  sessionKey:journal.sessionKey,messageId:message.__openclaw?.id,stopReason:message.stopReason,verifiedAt:Date.now()});
+
 // Operator-only repair, explicitly invoked via the CLI. Uses the operator's
 // authenticated Gateway API, never elevates the background plugin's authority.
 export async function recoverTask(config,id,connectionId,gateway,call=request) {
   const path=jobPath(config,id),journal=await readJSON(join(path,'journal.json'));
-  if(journal.connectionId!==connectionId||!journal.runId||journal.phase!=='needs_attention'||
-      ![undefined,'legacy_attention','invalid_json','full_result_unavailable'].includes(journal.diagnostic?.code))
-    throw Error('只能恢复当前连接下停留待核验、且有原 runId 的结果读取任务。');
+  if(journal.connectionId!==connectionId||!journal.runId||!['needs_attention','waiting'].includes(journal.phase)||
+      ![undefined,'legacy_attention','invalid_json','full_result_unavailable','terminal_unconfirmed'].includes(journal.diagnostic?.code))
+    throw Error('只能恢复当前连接下等待结果或待核验、且有原 runId 的任务。');
   const expected=`agent:`,suffix=`:subagent:lingxi-${journal.claim.serverId}-${id}`;
   if(!journal.sessionKey.startsWith(expected)||!journal.sessionKey.endsWith(suffix))throw Error('原任务会话身份不匹配。');
   const connection=(await connections(config)).find(c=>c.id===connectionId);
@@ -47,12 +61,14 @@ export async function recoverTask(config,id,connectionId,gateway,call=request) {
   const resumed=await rpc('resume',identity(journal.claim));
   if(resumed.state==='completed')return resumed.receipt;
   const terminal=await gateway('agent.wait',{runId:journal.runId,timeoutMs:1000});
-  if(terminal.status!=='ok')throw Error('原模型运行尚未确认成功结束，保留任务，不重新调用。');
+  if(terminal.status!=='ok'&&!unsettled(terminal))throw Error('原模型运行尚未确认成功结束，保留任务，不重新调用。');
   const history=await gateway('chat.history',{sessionKey:journal.sessionKey,limit:10});
   const latest=finalAssistant(history.messages),messageId=latest?.__openclaw?.id;
   if(typeof messageId!=='string'||!messageId)throw Error('无法定位原会话完整消息，保留任务。');
   const full=await gateway('chat.message.get',{sessionKey:journal.sessionKey,messageId,maxChars:1000000});
   const text=messageText(full.message);
+  if(terminal.status!=='ok'&&(!durableSuccess(full.message,journal)||latest!==history.messages?.at(-1)))
+    throw Error('运行查询没有结束回执，原会话也没有匹配 runId 的成功结束记录；保留任务。');
   if(full.ok!==true||full.message?.role!=='assistant'||full.message?.__openclaw?.truncated===true||
       (full.message?.__openclaw?.id&&full.message.__openclaw.id!==messageId)||typeof text!=='string')
     throw Error('原消息不可用或仍被截断，保留任务。');
@@ -64,7 +80,7 @@ export async function recoverTask(config,id,connectionId,gateway,call=request) {
   if(!text.trim().startsWith(prefix))throw Error('完整消息与原任务回复摘要不一致，保留任务。');
   let output;
   try{output={result:resultJSON(text)};}catch{throw Error('完整原回复不是有效 JSON，保留任务与原会话，不重新生成。');}
-  await atomicJSON(join(path,'recovered-output.json'),{runId:journal.runId,sessionKey:journal.sessionKey,messageId,output,recoveredAt:Date.now()});
+  await atomicJSON(join(path,'recovered-output.json'),{runId:journal.runId,sessionKey:journal.sessionKey,messageId,output,terminalEvidence:terminal.status==='ok'?{source:'agent.wait',runId:journal.runId}:terminalEvidence(full.message,journal),recoveredAt:Date.now()});
   return rpc('complete',{...identity(journal.claim),output});
 }
 
@@ -173,8 +189,21 @@ export class TaskWorker {
     }
     if(journal.phase==='waiting') {
       const result=await this.runtime.subagent.waitForRun({runId:journal.runId,timeoutMs:1000});
-      if(result.status==='pending'||(result.status==='timeout'&&!result.endedAt))return;
-      if(result.status!=='ok') {
+      let history;
+      if(unsettled(result)) {
+        if(this.runtime.subagent.getSessionMessages) {
+          history=await this.runtime.subagent.getSessionMessages({sessionKey:journal.sessionKey,limit:10});
+        }
+        const last=finalAssistant(history?.messages);
+        if(!durableSuccess(last,journal)||last!==history?.messages?.at(-1)) {
+          // Old recovery must not masquerade as an endlessly running model.
+          // A normal live run still waits; neither branch ever dispatches again.
+          if(journal.resultRecoveryVersion===1)await this.attention(connection,path,journal,'terminal_unconfirmed');
+          return;
+        }
+        journal.terminalEvidence=terminalEvidence(last,journal);
+        await atomicJSON(join(path,'journal.json'),journal);
+      } else if(result.status!=='ok') {
         const code=result.status==='timeout'?'model_timeout':
           ['aborted','cancelled'].includes(result.status)?'model_stopped':'model_failed';
         await this.attention(connection,path,journal,code);return;
@@ -185,7 +214,7 @@ export class TaskWorker {
       // SDK sessions.get reads the original task session. Unlike terminalReply
       // and chat.history it is not a display snapshot (verified on 2026.10.5).
       if(this.runtime.subagent.getSessionMessages) {
-        const history=await this.runtime.subagent.getSessionMessages({sessionKey:journal.sessionKey,limit:10});
+        history??=await this.runtime.subagent.getSessionMessages({sessionKey:journal.sessionKey,limit:10});
         const last=finalAssistant(history.messages),candidate=messageText(last);
         const prefix=typeof snapshot==='string'?(snapshot.endsWith('…')?snapshot.slice(0,-1):snapshot).trim():'';
         if(last?.__openclaw?.truncated!==true&&typeof candidate==='string'&&candidate.trim()&&

@@ -1,6 +1,6 @@
 {
   "name": "@wanghaonan3333-web/lingxi-team",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "openclaw": {
     "extensions": [
@@ -13,10 +13,17 @@
       "openclawVersion": "2026.10.5"
     }
   },
-  "description": "在 Octo 群与子区按当前成员连接灵犀个人账号，读取所属企业项目。",
+  "description": "Octo 成员绑定，灵犀 CLI 与网站文字任务自动执行、回写。",
   "files": [
     "index.js",
     "openclaw.plugin.json",
-    "README.md"
-  ]
+    "README.md",
+    "auth.js",
+    "storage.js",
+    "cli.js",
+    "worker.js"
+  ],
+  "devDependencies": {
+    "commander": "15.0.0"
+  }
 }

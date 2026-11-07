@@ -1,11 +1,12 @@
 {
   "id": "lingxi-team",
   "name": "灵犀团队助手",
-  "description": "在 Octo 群与子区按当前发言人连接灵犀，不授权整个群。",
+  "description": "成员绑定、CLI 操作及本人网站文字任务自动领取回写。",
   "contracts": {
     "tools": [
       "lingxi_team_read",
-      "lingxi_bind"
+      "lingxi_bind",
+      "lingxi_tasks"
     ]
   },
   "activation": {
@@ -21,12 +22,19 @@
       },
       "agentId": {
         "type": "string",
-        "description": "本企业专用 Agent ID，成员无须配置"
+        "description": "可选：限制为指定企业 Agent；省略时使用可信聊天上下文中的 Agent"
       },
       "hostKeyFile": {
         "type": "string",
         "description": "本机 0600 主机密钥文件的绝对路径"
       }
     }
-  }
+  },
+  "cliCommands": [
+    {
+      "name": "lingxi",
+      "description": "灵犀项目与任务 CLI（本机操作员入口）",
+      "hasSubcommands": true
+    }
+  ]
 }

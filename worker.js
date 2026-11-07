@@ -17,11 +17,55 @@ function prompt(claim) {
   return text;
 }
 function resultJSON(text) {
-  if(typeof text!=='string'||Buffer.byteLength(text)>16*1024*1024)throw Error('模型未返回有效结果文本。');
+  if(typeof text!=='string'||Buffer.byteLength(text)>MAX_RESULT_BYTES)throw Error('模型未返回有效结果文本。');
   const clean=text.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```$/,'$1');
   const value=JSON.parse(clean);
   if(!value||typeof value!=='object'||Array.isArray(value))throw Error('模型结果必须是 JSON 对象。');
   return value;
+}
+
+const MAX_RESULT_BYTES=16*1024*1024;
+const capped=text=>typeof text==='string'&&(text.length>=4095||text.endsWith('…'));
+const messageText=message=>typeof message?.content==='string'?message.content:
+  Array.isArray(message?.content)?message.content.filter(b=>b.type==='text').map(b=>b.text).join(''):undefined;
+const finalAssistant=messages=>messages?.filter(m=>m.role==='assistant'&&!m.tool_calls?.length&&
+  !m.content?.some?.(b=>b.type==='toolCall'||b.type==='tool_use')&&
+  !['inter_session','internal_system'].includes(m.provenance?.kind)).at(-1);
+
+// Operator-only repair, explicitly invoked via the CLI. Uses the operator's
+// authenticated Gateway API, never elevates the background plugin's authority.
+export async function recoverTask(config,id,connectionId,gateway,call=request) {
+  const path=jobPath(config,id),journal=await readJSON(join(path,'journal.json'));
+  if(journal.connectionId!==connectionId||!journal.runId||journal.phase!=='needs_attention'||
+      ![undefined,'legacy_attention','invalid_json','full_result_unavailable'].includes(journal.diagnostic?.code))
+    throw Error('只能恢复当前连接下停留待核验、且有原 runId 的结果读取任务。');
+  const expected=`agent:`,suffix=`:subagent:lingxi-${journal.claim.serverId}-${id}`;
+  if(!journal.sessionKey.startsWith(expected)||!journal.sessionKey.endsWith(suffix))throw Error('原任务会话身份不匹配。');
+  const connection=(await connections(config)).find(c=>c.id===connectionId);
+  if(!connection)throw Error('原成员连接不存在。');
+  const rpc=(action,payload)=>call(config,connection.context,'worker-'+action,{payload},true);
+  const resumed=await rpc('resume',identity(journal.claim));
+  if(resumed.state==='completed')return resumed.receipt;
+  const terminal=await gateway('agent.wait',{runId:journal.runId,timeoutMs:1000});
+  if(terminal.status!=='ok')throw Error('原模型运行尚未确认成功结束，保留任务，不重新调用。');
+  const history=await gateway('chat.history',{sessionKey:journal.sessionKey,limit:10});
+  const latest=finalAssistant(history.messages),messageId=latest?.__openclaw?.id;
+  if(typeof messageId!=='string'||!messageId)throw Error('无法定位原会话完整消息，保留任务。');
+  const full=await gateway('chat.message.get',{sessionKey:journal.sessionKey,messageId,maxChars:1000000});
+  const text=messageText(full.message);
+  if(full.ok!==true||full.message?.role!=='assistant'||full.message?.__openclaw?.truncated===true||
+      (full.message?.__openclaw?.id&&full.message.__openclaw.id!==messageId)||typeof text!=='string')
+    throw Error('原消息不可用或仍被截断，保留任务。');
+  const saved=await absent(join(path,'model-output.json'));
+  const preview=terminal.terminalReply?.disposition==='visible'?terminal.terminalReply.text:saved?.text;
+  // Refuse a different or subsequently edited reply in the original session.
+  if(typeof preview!=='string'||!preview.trim())throw Error('缺少原回复校验摘要，保留任务。');
+  const prefix=(preview.endsWith('…')?preview.slice(0,-1):preview).trim();
+  if(!text.trim().startsWith(prefix))throw Error('完整消息与原任务回复摘要不一致，保留任务。');
+  let output;
+  try{output={result:resultJSON(text)};}catch{throw Error('完整原回复不是有效 JSON，保留任务与原会话，不重新生成。');}
+  await atomicJSON(join(path,'recovered-output.json'),{runId:journal.runId,sessionKey:journal.sessionKey,messageId,output,recoveredAt:Date.now()});
+  return rpc('complete',{...identity(journal.claim),output});
 }
 
 export class TaskWorker {
@@ -32,6 +76,13 @@ export class TaskWorker {
   async stop(){this.closed=true;await this.running;await this.release?.();this.release=null;}
   async rpc(connection,action,payload={}) {
     return this.call(this.config,connection.context,'worker-'+action,{payload},true);
+  }
+  async attention(connection,path,journal,code,phase='needs_attention') {
+    // Only fixed reason codes leave the host. Runtime/JSON errors can contain
+    // prompts, provider credentials or excerpts of the model's private reply.
+    journal.phase=phase;journal.diagnostic={code,recordedAt:Date.now()};
+    await atomicJSON(join(path,'journal.json'),journal);
+    await this.rpc(connection,'progress',{...identity(journal.claim),stage:'needs_attention',diagnostic:{code}});
   }
   async tick() {
     if(this.closed||this.busy)return;
@@ -97,41 +148,73 @@ export class TaskWorker {
       journal.phase='dispatch_uncertain';await atomicJSON(join(path,'journal.json'),journal);
       await this.rpc(connection,'start',{...identity(journal.claim),sessionKey:journal.sessionKey});
       if(this.closed)return;
-      const run=await this.runtime.subagent.run({sessionKey:journal.sessionKey,message,
-        deliver:false,promptMode:'minimal',disableTools:true,idempotencyKey:journal.claim.jobId});
-      if(!run?.runId)throw Error('缺少模型执行回执。');
+      let run;
+      try {
+        run=await this.runtime.subagent.run({sessionKey:journal.sessionKey,message,
+          deliver:false,promptMode:'minimal',disableTools:true,idempotencyKey:journal.claim.jobId});
+        if(!run?.runId)throw Error('缺少模型执行回执。');
+      } catch {
+        await this.attention(connection,path,journal,'dispatch_uncertain','dispatch_uncertain');return;
+      }
       journal.runId=run.runId;journal.sessionKey=run.sessionKey||journal.sessionKey;journal.phase='waiting';
       await atomicJSON(join(path,'journal.json'),journal);
       await this.rpc(connection,'progress',{...identity(journal.claim),stage:'model_running'});
+    }
+    if(journal.phase==='needs_attention'&&journal.runId&&journal.resultRecoveryVersion!==1&&
+       [undefined,'legacy_attention','invalid_json','full_result_unavailable'].includes(journal.diagnostic?.code)) {
+      const saved=await absent(join(path,'model-output.json'));
+      // One read-only recovery attempt per old capped reply. Keep the original
+      // preview as evidence; only return to wait/read, never to prepared/run.
+      if(capped(saved?.text)&&saved.text.endsWith('…')) {
+        await atomicJSON(join(path,'truncated-snapshot.json'),saved);
+        journal.phase='waiting';journal.resultRecoveryVersion=1;
+        await atomicJSON(join(path,'journal.json'),journal);
+      }
     }
     if(journal.phase==='waiting') {
       const result=await this.runtime.subagent.waitForRun({runId:journal.runId,timeoutMs:1000});
       if(result.status==='pending'||(result.status==='timeout'&&!result.endedAt))return;
       if(result.status!=='ok') {
-        journal.phase='needs_attention';await atomicJSON(join(path,'journal.json'),journal);
-        await this.rpc(connection,'progress',{...identity(journal.claim),stage:'needs_attention'});return;
+        const code=result.status==='timeout'?'model_timeout':
+          ['aborted','cancelled'].includes(result.status)?'model_stopped':'model_failed';
+        await this.attention(connection,path,journal,code);return;
       }
-      let text=result.terminalReply?.disposition==='visible'?result.terminalReply.text:undefined;
-      if(!text&&this.runtime.subagent.getSessionMessages) {
+      const prior=journal.resultRecoveryVersion===1?await absent(join(path,'truncated-snapshot.json')):null;
+      const snapshot=result.terminalReply?.disposition==='visible'?result.terminalReply.text:prior?.text;
+      let text;
+      // SDK sessions.get reads the original task session. Unlike terminalReply
+      // and chat.history it is not a display snapshot (verified on 2026.10.5).
+      if(this.runtime.subagent.getSessionMessages) {
         const history=await this.runtime.subagent.getSessionMessages({sessionKey:journal.sessionKey,limit:10});
-        const last=history.messages?.filter(m=>m.role==='assistant'&&!m.tool_calls?.length).at(-1);
-        text=typeof last?.content==='string'?last.content:last?.content?.filter(b=>b.type==='text').map(b=>b.text).join('');
+        const last=finalAssistant(history.messages),candidate=messageText(last);
+        const prefix=typeof snapshot==='string'?(snapshot.endsWith('…')?snapshot.slice(0,-1):snapshot).trim():'';
+        if(last?.__openclaw?.truncated!==true&&typeof candidate==='string'&&candidate.trim()&&
+           (!prefix||candidate.trim().startsWith(prefix)))text=candidate;
       }
-      if(typeof text==='string'&&Buffer.byteLength(text)<=16*1024*1024)await atomicJSON(join(path,'model-output.json'),{text});
+      // Short snapshots are complete. Never parse an at-cap lifecycle preview.
+      if(!text&&snapshot&&!capped(snapshot))text=snapshot;
+      if(!text&&snapshot) {
+        await atomicJSON(join(path,'model-output.json'),{text:snapshot,source:'terminal_snapshot'});
+        await this.attention(connection,path,journal,'full_result_unavailable');return;
+      }
+      if(typeof text==='string'&&Buffer.byteLength(text)<=MAX_RESULT_BYTES)await atomicJSON(join(path,'model-output.json'),{text});
       try {journal.output={result:resultJSON(text)};journal.phase='output';}
-      catch(e){journal.phase='needs_attention';await atomicJSON(join(path,'journal.json'),journal);await this.rpc(connection,'progress',{...identity(journal.claim),stage:'needs_attention'});throw e;}
+      catch {
+        await this.attention(connection,path,journal,typeof text==='string'&&text.trim()?'invalid_json':'empty_result');return;
+      }
       await atomicJSON(join(path,'journal.json'),journal);
     }
     if(journal.phase==='output') {
       let receipt;
       try {receipt=await this.rpc(connection,'complete',{...identity(journal.claim),output:journal.output});}
       catch(e) {
-        if(e.status===400){journal.phase='needs_attention';await atomicJSON(join(path,'journal.json'),journal);await this.rpc(connection,'progress',{...identity(journal.claim),stage:'needs_attention'});}
+        if(e.status===400)await this.attention(connection,path,journal,'result_rejected');
         throw e;
       }
       await this.finish(path,journal,receipt,activePath);
     } else if(['dispatch_uncertain','needs_attention'].includes(journal.phase)) {
-      await this.rpc(connection,'progress',{...identity(journal.claim),stage:'needs_attention'});
+      await this.rpc(connection,'progress',{...identity(journal.claim),stage:'needs_attention',
+        diagnostic:{code:journal.diagnostic?.code||(journal.phase==='dispatch_uncertain'?'dispatch_uncertain':'legacy_attention')}});
     }
     await atomicJSON(statusPath,{state:journal.phase,jobId:journal.claim.jobId,updatedAt:Date.now()});
   }
@@ -147,7 +230,8 @@ export async function localStatus(config) {
   for(const name of await readdir(join(root,'jobs'))) {
     if(!/^[a-f0-9]{32}$/.test(name))continue;
     const journal=await readJSON(join(jobPath(config,name),'journal.json'));
-    tasks.push({jobId:name,connectionId:journal.connectionId,phase:journal.phase,status:journal.receipt?.status});
+    tasks.push({jobId:name,connectionId:journal.connectionId,phase:journal.phase,status:journal.receipt?.status,
+      runId:journal.runId,diagnostic:journal.diagnostic});
   }
   return {service:await absent(join(root,'service.json')),connections:list.map(c=>({id:c.id,agent:c.context.agentId})),tasks};
 }

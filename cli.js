@@ -3,7 +3,7 @@
 // connection/user ID from model arguments; identity comes from OpenClaw context.
 import {request,readForCaller} from './auth.js';
 import {connections,jobPath,readJSON,atomicJSON} from './storage.js';
-import {localStatus} from './worker.js';
+import {localStatus,recoverTask} from './worker.js';
 import {join} from 'node:path';
 
 export async function executeForCaller(config,context,args) {
@@ -36,6 +36,12 @@ export function registerCLI(api,getConfig) {
       const record=await readJSON(join(jobPath(getConfig(),id),'journal.json'));
       print({jobId:id,phase:record.phase,input:record.claim.payload.request});
     });
+    root.command('recover <id>').description('从原会话读取完整结果并补交，不重新调用模型')
+      .requiredOption('--connection <id>','本机原成员连接')
+      .action(async(id,o)=>{
+        const {callGatewayFromCli}=await import('openclaw/plugin-sdk/gateway-runtime');
+        print(await recoverTask(getConfig(),id,o.connection,(method,params)=>callGatewayFromCli(method,{json:true,timeout:'30000'},params)));
+      });
     root.command('submit <id>').description('核验原会话后补交已有结果，不重新调用模型')
       .requiredOption('--connection <id>').requiredOption('--file <path>','0600 JSON 结果文件')
       .requiredOption('--reconciled','已核验结果来自该任务原会话')
